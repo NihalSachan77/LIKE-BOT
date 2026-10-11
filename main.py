@@ -5,7 +5,6 @@
 #━━━━━━━━━━━━━━━━━━━
 import json
 import asyncio
-import aiohttp
 import nest_asyncio
 from datetime import datetime, timedelta
 from pytz import timezone
