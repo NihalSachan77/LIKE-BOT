@@ -7,3 +7,4 @@ nest_asyncio
 pytz
 anyio==4.15.1
 httpx==0.28.1
+python-telegram-bot
