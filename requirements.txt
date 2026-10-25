@@ -1,11 +1,2 @@
-httpx>=0.27.0
-google-play-scraper>=1.2.0
-pycryptodome>=3.20.0
-protobuf-decoder
-protobuf
-nest_asyncio
-pytz
-anyio==4.15.1
-httpx==0.28.1
-python-telegram-bot
-aiohttp
+python-telegram-bot[job-queue]>=21.6,<23
+requests>=2.32,<3
