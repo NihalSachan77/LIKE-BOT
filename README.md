@@ -1,59 +1,50 @@
-# NXT Like Bot — Premium Edition
+# NXT Like Bot — Render setup
 
-Telegram bot starter with a premium inline menu, free/premium daily limits, redeem keys, admin commands, multi-channel force join, SQLite storage, and Render worker configuration.
+## Deploy on Render's free Web Service
 
-## Important limitation
-No likes API was provided. `/nxtlike` intentionally returns a clear "API not configured" message until you set `LIKE_API_URL`. This project does not invent or simulate successful likes. Only integrate an API you are authorized to use and whose terms allow the requested operation. `/profile` is a placeholder until a separate profile endpoint is supplied.
+This version exposes `/health` on `0.0.0.0:$PORT`, so it satisfies Render's Web Service port check. It runs Telegram polling in the same process.
 
-## Setup
-1. Create a bot using Telegram's official BotFather and copy its token.
-2. Upload this folder to a private GitHub repository.
-3. In Render, create a Background Worker from the repository.
-4. Set environment variables:
-   - `BOT_TOKEN`: your bot token
-   - `ADMIN_IDS`: your numeric Telegram user ID (comma-separated for multiple admins)
-   - `DEFAULT_CHANNEL`: defaults to `@trynexttime`
-   - `LIKE_API_URL`: leave blank until you have a working authorized endpoint, e.g. a URL template containing `{uid}` and optionally `{region}`
-5. Ensure the bot can inspect membership for every required channel. For reliable membership checks, add the bot as an administrator in each channel. For private channels, pass the channel ID and a valid invite URL with `/addchannel <channel_id> <invite_url>`.
-6. Deploy and open the bot with `/start`.
+1. Upload the contents of this folder to a **private GitHub repository**.
+2. In Render choose **New + → Blueprint** and select the repository, or create a Python Web Service manually.
+3. If creating manually, use:
+   - Build command: `pip install -r requirements.txt`
+   - Start command: `python main.py`
+   - Health check path: `/health`
+   - Instance type: Free (if offered for your account)
+4. Set `BOT_TOKEN` to a fresh token from Telegram's official @BotFather.
+5. Set `ADMIN_IDS` to your own numeric Telegram user ID.
+6. Set `DEFAULT_CHANNEL` to your channel username, or leave the default.
+7. Leave `LIKE_API_URL` blank until you have a trusted, working API endpoint authorized for this use.
+8. Deploy and check Logs, then send `/start` to the bot.
 
-## Commands
-User:
-- `/start`, `/help`, `/id`, `/mystatus`
-- `/nxtlike <UID>` (requires `LIKE_API_URL`)
-- `/profile <UID>` (placeholder until profile API is configured)
-- `/redeem <CODE>`
+## Important free-tier limitation
 
-Admin (IDs in `ADMIN_IDS`):
-- `/addchannel @channel [invite_url]`
-- `/removechannel @channel`
-- `/channels`
-- `/setchannel @channel`
-- `/clearchannels`
-- `/setjoin on|off`
-- `/addpremium <user_id> <days>`
-- `/removepremium <user_id>`
-- `/genkey <days>`
-- `/revokekey <key>`
-- `/stats`
-- `/broadcast <message>`
+Render's free Web Services can spin down after a period without inbound web traffic. Since this bot uses Telegram polling, it may become temporarily unavailable when the service sleeps. A free service is not guaranteed to be always-on. If you need reliable 24/7 operation, use a hosting option that supports an always-on worker, or adapt the bot to a webhook architecture.
 
-## Multiple channel examples
-- Public: `/addchannel @mychannel`
-- Private: `/addchannel -1001234567890 https://t.me/+inviteCode`
-- Show channels: `/channels`
-- Remove one: `/removechannel @mychannel`
+## Features and API limitation
 
-The bot must be able to access/check channel membership. If channel checks fail, fix the channel ID/username and bot permissions before turning on force join.
+This is a Telegram bot starter with daily limits, premium keys, channel membership checks, SQLite, and AutoLike scheduling. AutoLike runs once per day at the configured Asia/Kolkata (IST) time. It may run a few minutes after that time because the scheduler checks every five minutes. AutoLike and like commands do not actually deliver likes unless `LIKE_API_URL` is configured with a working API you are authorized to use. A successful scheduled job only means the scheduler ran; it does not prove that a like request succeeded.
 
-## AutoLike
-- Premium users can run `/autolike <UID>` to schedule one request per configured interval (default: every 24 hours).
-- `/stopautolike` disables it; `/myautolike` shows status.
-- Set `AUTOLIKE_INTERVAL_HOURS` to an integer of at least 1.
-- AutoLike does nothing until `LIKE_API_URL` is configured. Use only a trusted API you are authorized to use; check the game's rules and API terms. Repeated requests may be rate-limited by the provider.
-- The Render service uses a local SQLite database. Configure persistent storage if AutoLike schedules and subscriptions must survive redeploys.
+## Environment variables
+
+- `BOT_TOKEN`: required Telegram bot token.
+- `ADMIN_IDS`: comma-separated numeric Telegram user IDs.
+- `DEFAULT_CHANNEL`: channel used for the default join check.
+- `LIKE_API_URL`: optional authorized API URL template using `{uid}` and optionally `{region}`.
+- `FREE_DAILY_LIMIT`: default `3`.
+- `PREMIUM_DAILY_LIMIT`: default `50`.
+- `AUTOLIKE_TIME`: default daily run time `09:00` in Asia/Kolkata (IST). The admin command `/setautoliketime HH:MM` changes the daily run time, e.g. `/setautoliketime 21:30`.
 
 ## Security
-- Never commit `.env` or bot tokens to GitHub.
-- Rotate the token through BotFather if it leaks.
-- SQLite is stored locally beside `database.py`; use persistent disk/storage on hosting if you need data to survive redeploys. The included Render worker configuration does not automatically provision persistent storage.
+
+Never commit `.env` files, bot tokens, or your live SQLite database to GitHub. The old uploaded project contained a hard-coded bot token; revoke it with @BotFather and use a newly generated token in Render Environment settings. Do not put the token into source code or share it in screenshots.
+
+## Added admin commands
+
+- `/addadmin <telegram_user_id>` — add an admin stored in SQLite.
+- `/removeadmin <telegram_user_id>` — remove a database admin. The root admin configured in Render's `ADMIN_IDS` must be removed from Render Environment instead.
+- `/admins` — list configured admin IDs.
+- `/setautoliketime <hours>` — set the saved AutoLike interval (1–168 hours). This setting is stored in SQLite, so note that it may reset on redeploy/restart if you do not configure persistent storage.
+- `/runautolike <user_id>` — immediately run the saved AutoLike request for that user's saved player UID. Requires `LIKE_API_URL` to be configured with a trusted, authorized endpoint.
+
+The first/root admin must be listed in Render's `ADMIN_IDS` environment variable before using admin commands. Do not make an untrusted user an admin.

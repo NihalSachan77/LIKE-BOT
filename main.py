@@ -2,7 +2,10 @@ import os
 import html
 import logging
 import asyncio
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes,
@@ -17,14 +20,28 @@ DEFAULT_CHANNEL = os.getenv("DEFAULT_CHANNEL", "@trynexttime").strip()
 LIKE_API_URL = os.getenv("LIKE_API_URL", "https://nihalviplike.vercel.app/like?uid={uid}&region={region}&key=Nihalsachan").strip()
 FREE_DAILY_LIMIT = int(os.getenv("FREE_DAILY_LIMIT", "3"))
 PREMIUM_DAILY_LIMIT = int(os.getenv("PREMIUM_DAILY_LIMIT", "50"))
-AUTOLIKE_INTERVAL_HOURS = max(1, int(os.getenv("AUTOLIKE_INTERVAL_HOURS", "24")))
+AUTOLIKE_TIMEZONE = ZoneInfo("Asia/Kolkata")
+DEFAULT_AUTOLIKE_TIME = os.getenv("AUTOLIKE_TIME", "04:00").strip()
 PORT = int(os.getenv("PORT", "10000"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("nxt-like-bot")
 
 def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
+    # Environment admins are the bootstrap/root admins; database admins can be managed in chat.
+    stored = db.get_setting("admin_ids", "")
+    dynamic = {int(x) for x in stored.split(",") if x.strip().isdigit()}
+    return user_id in ADMIN_IDS or user_id in dynamic
+
+
+def autolike_time() -> str:
+    value = db.get_setting("autolike_time", DEFAULT_AUTOLIKE_TIME)
+    try:
+        datetime.strptime(value, "%H:%M")
+        return value
+    except (TypeError, ValueError):
+        return "09:00"
+
 
 def main_menu():
     return InlineKeyboardMarkup([
@@ -96,7 +113,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/mystatus — Subscription status\n/redeem <CODE> — Redeem premium key\n"
         "/id — Your Telegram ID\n/help — Help\n\n"
         "Admin:\n/addchannel <@channel> [invite_url]\n/removechannel <@channel>\n/channels\n/setchannel <@channel>\n/clearchannels\n/setjoin on|off\n"
-        "/addpremium <user_id> <days>\n/removepremium <user_id>\n/genkey <days>\n/revokekey <key>\n/stats\n/broadcast <message>")
+        "/addpremium <user_id> <days>\n/removepremium <user_id>\n/genkey <days>\n/revokekey <key>\n/stats\n/broadcast <message>\n/addadmin <user_id>\n/removeadmin <user_id>\n/admins\n/setautoliketime <HH:MM> (Asia/Kolkata)\n/runautolike <user_id>")
     await update.message.reply_text(text)
 
 async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -304,6 +321,73 @@ async def status_cmd_from_callback(q, context):
 def admin_only(update: Update) -> bool:
     return bool(update.effective_user and is_admin(update.effective_user.id))
 
+async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update):
+        await update.message.reply_text("⛔ Admin only."); return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /addadmin <telegram_user_id>"); return
+    uid = int(context.args[0])
+    ids = {int(x) for x in db.get_setting("admin_ids", "").split(",") if x.strip().isdigit()}
+    ids.add(uid)
+    db.set_setting("admin_ids", ",".join(map(str, sorted(ids))))
+    await update.message.reply_text(f"✅ Admin added: {uid}")
+
+async def removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update):
+        await update.message.reply_text("⛔ Admin only."); return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /removeadmin <telegram_user_id>"); return
+    uid = int(context.args[0])
+    if uid in ADMIN_IDS:
+        await update.message.reply_text("⚠️ This is a Render environment admin. Remove it from ADMIN_IDS in Render instead."); return
+    ids = {int(x) for x in db.get_setting("admin_ids", "").split(",") if x.strip().isdigit()}
+    ids.discard(uid)
+    db.set_setting("admin_ids", ",".join(map(str, sorted(ids))))
+    await update.message.reply_text(f"✅ Admin removed if present: {uid}")
+
+async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update):
+        await update.message.reply_text("⛔ Admin only."); return
+    ids = sorted(ADMIN_IDS | {int(x) for x in db.get_setting("admin_ids", "").split(",") if x.strip().isdigit()})
+    await update.message.reply_text("👮 Admin IDs:\n" + ("\n".join(map(str, ids)) if ids else "None configured"))
+
+async def setautoliketime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update):
+        await update.message.reply_text("⛔ Admin only."); return
+    if not context.args:
+        await update.message.reply_text("Usage: /setautoliketime HH:MM\nExample: /setautoliketime 21:30\nTimezone: Asia/Kolkata (IST)"); return
+    value = context.args[0]
+    try:
+        datetime.strptime(value, "%H:%M")
+    except ValueError:
+        await update.message.reply_text("❌ Use 24-hour time in HH:MM format, e.g. /setautoliketime 21:30 (Asia/Kolkata / IST)."); return
+    db.set_setting("autolike_time", value)
+    await update.message.reply_text(f"✅ Daily AutoLike time set to {value} Asia/Kolkata (IST). Active AutoLikes will run once per day at or shortly after this time.")
+
+async def runautolike_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update):
+        await update.message.reply_text("⛔ Admin only."); return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /runautolike <user_id> — run that user's saved AutoLike now"); return
+    if not LIKE_API_URL:
+        await update.message.reply_text("⚠️ Set a working authorized LIKE_API_URL in Render first."); return
+    target_user = int(context.args[0])
+    row = db.get_autolike(target_user)
+    if not row:
+        await update.message.reply_text("❌ No saved AutoLike found for that user."); return
+    try:
+        url = LIKE_API_URL.format(uid=row["player_uid"], region="ind")
+        response = await asyncio.to_thread(requests.get, url, timeout=15)
+        if response.status_code == 200:
+            db.record_usage(target_user)
+            db.mark_autolike_run(target_user)
+            await update.message.reply_text(f"✅ Manual AutoLike request succeeded for user {target_user}, UID {row['player_uid']}. API HTTP {response.status_code}.")
+        else:
+            await update.message.reply_text(f"❌ API returned HTTP {response.status_code}; no success recorded.")
+    except Exception as exc:
+        log.exception("Manual AutoLike failed")
+        await update.message.reply_text(f"❌ AutoLike request failed: {type(exc).__name__}. Check Render logs and API URL.")
+
 async def addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admin_only(update):
         await update.message.reply_text("⛔ Admin only."); return
@@ -417,13 +501,13 @@ async def autolike_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ AutoLike needs a working authorized likes API. Set LIKE_API_URL in Render first.")
         return
     if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /autolike <PLAYER_UID>\nAutoLike sends a request on a scheduled interval; default is every 24 hours.")
+        await update.message.reply_text(f"Usage: /autolike <PLAYER_UID>\nAutoLike runs daily at {autolike_time()} Asia/Kolkata (IST).")
         return
     if db.plan_for(user_id) != "premium":
         await update.message.reply_text("💎 AutoLike is a premium feature. Redeem a key or ask an admin for access.")
         return
     db.set_autolike(user_id, context.args[0])
-    await update.message.reply_text(f"✅ AutoLike enabled for UID {context.args[0]}. The bot will make one API request every {AUTOLIKE_INTERVAL_HOURS} hour(s), while the API is configured. Use /stopautolike to stop it.")
+    await update.message.reply_text(f"✅ AutoLike enabled for UID {context.args[0]}. It is scheduled daily at {autolike_time()} Asia/Kolkata (IST), while the API is configured. Use /stopautolike to stop it.")
 
 async def stopautolike_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.stop_autolike(update.effective_user.id)
@@ -434,12 +518,17 @@ async def myautolike_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not row or not row["enabled"]:
         await update.message.reply_text("AutoLike is currently OFF. Use /autolike <UID> to enable it (premium required).")
     else:
-        await update.message.reply_text(f"❤️ AutoLike: ON\nPlayer UID: {row['player_uid']}\nInterval: every {AUTOLIKE_INTERVAL_HOURS} hour(s)\nLast run: {row['last_run'] or 'Not run yet'}")
+        await update.message.reply_text(f"❤️ AutoLike: ON\nPlayer UID: {row['player_uid']}\nDaily time: {autolike_time()} Asia/Kolkata (IST)\nLast run: {row['last_run'] or 'Not run yet'}")
 
 async def autolike_worker(context: ContextTypes.DEFAULT_TYPE):
     if not LIKE_API_URL:
         return
-    now = datetime.now(timezone.utc)
+    now_local = datetime.now(AUTOLIKE_TIMEZONE)
+    scheduled_time = datetime.strptime(autolike_time(), "%H:%M").time()
+    # Run once per local calendar day at or after the configured Asia/Kolkata time.
+    if now_local.time().replace(tzinfo=None) < scheduled_time:
+        return
+    today_local = now_local.date()
     for row in db.active_autolikes():
         try:
             # Only premium users can keep an AutoLike schedule active.
@@ -449,7 +538,10 @@ async def autolike_worker(context: ContextTypes.DEFAULT_TYPE):
             last = row.get("last_run")
             if last:
                 try:
-                    if now - datetime.fromisoformat(last) < timedelta(hours=AUTOLIKE_INTERVAL_HOURS):
+                    last_dt = datetime.fromisoformat(last)
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    if last_dt.astimezone(AUTOLIKE_TIMEZONE).date() == today_local:
                         continue
                 except ValueError:
                     pass
@@ -466,9 +558,34 @@ async def autolike_worker(context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     log.exception("Unhandled bot exception", exc_info=context.error)
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/", "/health"):
+            body = b"OK"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_error(404)
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    # Render Web Services must bind to 0.0.0.0:$PORT.
+    port = int(os.getenv("PORT", "10000"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log.info("Health server listening on port %s", port)
+
+
 def main():
     if not BOT_TOKEN:
         raise SystemExit("Set BOT_TOKEN in environment variables.")
+    start_health_server()
     db.init_db()
     if DEFAULT_CHANNEL and not db.list_channels():
         db.add_channel(DEFAULT_CHANNEL, f"https://t.me/{DEFAULT_CHANNEL.lstrip('@')}")
@@ -485,7 +602,10 @@ def main():
         CommandHandler("setjoin", setjoin), CommandHandler("addpremium", addpremium),
         CommandHandler("removepremium", removepremium), CommandHandler("genkey", genkey),
         CommandHandler("revokekey", revokekey), CommandHandler("stats", stats),
-        CommandHandler("broadcast", broadcast), CallbackQueryHandler(callback),
+        CommandHandler("broadcast", broadcast),
+        CommandHandler("addadmin", addadmin), CommandHandler("removeadmin", removeadmin),
+        CommandHandler("admins", admins_cmd), CommandHandler("setautoliketime", setautoliketime_cmd),
+        CommandHandler("runautolike", runautolike_cmd), CallbackQueryHandler(callback),
     ]
     for h in handlers:
         app.add_handler(h)
