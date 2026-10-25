@@ -20,4 +20,4 @@ services:
       - key: PREMIUM_DAILY_LIMIT
         value: "50"
       - key: AUTOLIKE_TIME
-        value: "09:00"
+        value: "04:00"
